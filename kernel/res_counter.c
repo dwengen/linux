@@ -29,7 +29,7 @@ int res_counter_charge_locked(struct res_counter *counter, unsigned long val,
 
 	if (counter->usage + val > counter->limit) {
 		counter->failcnt++;
-		ret = -ENOMEM;
+		ret = -1;
 		if (!force)
 			return ret;
 	}
