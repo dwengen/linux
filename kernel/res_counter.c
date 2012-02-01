@@ -170,10 +170,24 @@ u64 res_counter_read_u64(struct res_counter *counter, int member)
 
 	return ret;
 }
+
+void res_counter_write_u64(struct res_counter *counter, int member, u64 val)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&counter->lock, flags);
+	*res_counter_member(counter, member) = val;
+	spin_unlock_irqrestore(&counter->lock, flags);
+}
 #else
 u64 res_counter_read_u64(struct res_counter *counter, int member)
 {
 	return *res_counter_member(counter, member);
+}
+
+void res_counter_write_u64(struct res_counter *counter, int member, u64 val)
+{
+	*res_counter_member(counter, member) = val;
 }
 #endif
 

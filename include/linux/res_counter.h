@@ -78,6 +78,8 @@ ssize_t res_counter_read(struct res_counter *counter, int member,
 int res_counter_memparse_write_strategy(const char *buf,
 					unsigned long long *res);
 
+void res_counter_write_u64(struct res_counter *counter, int member, u64 val);
+
 /*
  * the field descriptors. one for each member of res_counter
  */
