@@ -9,6 +9,7 @@ TARGETS += ptrace
 TARGETS += timers
 TARGETS += vm
 TARGETS += powerpc
+TARGETS += cpuacct
 
 all:
 	for TARGET in $(TARGETS); do \
