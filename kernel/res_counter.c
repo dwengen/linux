@@ -49,7 +49,8 @@ static int __res_counter_charge_until(struct res_counter *counter,
 	struct res_counter *c, *u;
 
 	r = ret = 0;
-	*limit_fail_at = NULL;
+	if (limit_fail_at)
+		*limit_fail_at = NULL;
 	local_irq_save(flags);
 	for (c = counter; c != top; c = c->parent) {
 		spin_lock(&c->lock);
@@ -57,7 +58,8 @@ static int __res_counter_charge_until(struct res_counter *counter,
 		spin_unlock(&c->lock);
 		if (r < 0 && !ret) {
 			ret = r;
-			*limit_fail_at = c;
+			if (limit_fail_at)
+				*limit_fail_at = c;
 			if (!force)
 				break;
 		}
