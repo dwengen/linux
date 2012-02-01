@@ -1,4 +1,5 @@
 TARGETS = breakpoints
+TARGETS += cpuacct
 TARGETS += cpu-hotplug
 TARGETS += efivarfs
 TARGETS += kcmp
