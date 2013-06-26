@@ -1655,6 +1655,23 @@ xfs_file_ioctl(
 		if (error)
 			return -XFS_ERROR(error);
 
+		/* non-privileged users should not be able to trim blocks on
+		 * objects they cannot write to, so require them to specify
+		 * either their own uid, or a group they are a member of
+		 */
+		if (!capable(CAP_SYS_ADMIN)) {
+			if (!(eofb.eof_flags & (XFS_EOF_FLAGS_UID | XFS_EOF_FLAGS_GID)))
+				return -XFS_ERROR(EPERM);
+
+			if ((eofb.eof_flags & XFS_EOF_FLAGS_UID) &&
+			    !uid_eq(current_fsuid(), keofb.eof_uid))
+				return -XFS_ERROR(EPERM);
+
+			if ((eofb.eof_flags & XFS_EOF_FLAGS_GID) &&
+			    !in_group_p(keofb.eof_gid))
+				return -XFS_ERROR(EPERM);
+		}
+
 		error = xfs_icache_free_eofblocks(mp, &keofb);
 		return -error;
 	}
