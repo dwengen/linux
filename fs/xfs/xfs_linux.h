@@ -185,6 +185,14 @@ static inline kgid_t xfs_gid_to_kgid(__uint32_t gid)
 	return make_kgid(&init_user_ns, gid);
 }
 
+struct xfs_eofblocks {
+	__u32		eof_flags;
+	kuid_t		eof_uid;
+	kgid_t		eof_gid;
+	prid_t		eof_prid;
+	__u64		eof_min_file_size;
+};
+
 /*
  * Various platform dependent calls that don't fit anywhere else
  */
