@@ -4556,7 +4556,7 @@ static void __init cgroup_init_subsys(struct cgroup_subsys *ss)
 	 * init_css_set is in the subsystem's top cgroup. */
 	init_css_set.subsys[ss->subsys_id] = css;
 
-	need_forkexit_callback |= ss->fork || ss->exit;
+	need_forkexit_callback |= ss->fork || ss->can_fork || ss->exit;
 
 	/* At system boot, before all subsystems have been
 	 * registered, no tasks have been forked, so we don't
@@ -4989,13 +4989,40 @@ static const struct file_operations proc_cgroupstats_operations = {
  * At the point that cgroup_fork() is called, 'current' is the parent
  * task, and the passed argument 'child' points to the child task.
  */
-void cgroup_fork(struct task_struct *child)
+int cgroup_fork(struct task_struct *child)
 {
+	struct cgroup_subsys *ss;
+	struct cgroup_subsys *failed_ss;
+	int i;
+	int err = 0;
+
 	task_lock(current);
+	if (need_forkexit_callback) {
+		for_each_builtin_subsys(ss, i) {
+			if (ss->can_fork) {
+				err = ss->can_fork();
+				if (err) {
+					failed_ss = ss;
+					goto out_cancel_fork;
+				}
+			}
+		}
+	}
 	get_css_set(task_css_set(current));
 	child->cgroups = current->cgroups;
-	task_unlock(current);
 	INIT_LIST_HEAD(&child->cg_list);
+
+out_cancel_fork:
+	if (err) {
+		for_each_builtin_subsys(ss, i) {
+			if (ss == failed_ss)
+				break;
+			if (ss->cancel_can_fork)
+				ss->cancel_can_fork();
+		}
+	}
+	task_unlock(current);
+	return err;
 }
 
 /**
@@ -5088,7 +5115,7 @@ void cgroup_post_fork(struct task_struct *child)
  *    which wards off any cgroup_attach_task() attempts, or task is a failed
  *    fork, never visible to cgroup_attach_task.
  */
-void cgroup_exit(struct task_struct *tsk, int run_callbacks)
+void cgroup_exit(struct task_struct *tsk)
 {
 	struct cgroup_subsys *ss;
 	struct css_set *cset;
@@ -5111,7 +5138,7 @@ void cgroup_exit(struct task_struct *tsk, int run_callbacks)
 	cset = task_css_set(tsk);
 	RCU_INIT_POINTER(tsk->cgroups, &init_css_set);
 
-	if (run_callbacks && need_forkexit_callback) {
+	if (need_forkexit_callback) {
 		/*
 		 * fork/exit callbacks are supported only for builtin
 		 * subsystems, see cgroup_post_fork() for details.

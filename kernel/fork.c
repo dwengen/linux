@@ -1265,7 +1265,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	p->audit_context = NULL;
 	if (clone_flags & CLONE_THREAD)
 		threadgroup_change_begin(current);
-	cgroup_fork(p);
+	retval = cgroup_fork(p);
+	if (retval)
+		goto bad_fork_cleanup_threadgroup;
 #ifdef CONFIG_NUMA
 	p->mempolicy = mpol_dup(p->mempolicy);
 	if (IS_ERR(p->mempolicy)) {
@@ -1528,9 +1530,10 @@ bad_fork_cleanup_policy:
 	mpol_put(p->mempolicy);
 bad_fork_cleanup_cgroup:
 #endif
+	cgroup_exit(p);
+bad_fork_cleanup_threadgroup:
 	if (clone_flags & CLONE_THREAD)
 		threadgroup_change_end(current);
-	cgroup_exit(p, 0);
 	delayacct_tsk_free(p);
 	module_put(task_thread_info(p)->exec_domain->module);
 bad_fork_cleanup_count:

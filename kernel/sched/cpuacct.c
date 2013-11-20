@@ -5,6 +5,7 @@
 #include <linux/cpumask.h>
 #include <linux/seq_file.h>
 #include <linux/rcupdate.h>
+#include <linux/res_counter.h>
 #include <linux/kernel_stat.h>
 #include <linux/err.h>
 
@@ -31,6 +32,11 @@ struct cpuacct {
 	/* cpuusage holds pointer to a u64-type object on every cpu */
 	u64 __percpu *cpuusage;
 	struct kernel_cpustat __percpu *cpustat;
+
+	/* counter for allowed tasks */
+	struct res_counter task_limit;
+	/* counter for allowed forks */
+	struct res_counter fork_limit;
 };
 
 static inline struct cpuacct *css_ca(struct cgroup_subsys_state *css)
@@ -49,6 +55,11 @@ static inline struct cpuacct *parent_ca(struct cpuacct *ca)
 	return css_ca(css_parent(&ca->css));
 }
 
+static inline bool res_limit_enabled(struct res_counter *res)
+{
+	return res_counter_read_u64(res, RES_LIMIT) != RES_COUNTER_MAX;
+}
+
 static DEFINE_PER_CPU(u64, root_cpuacct_cpuusage);
 static struct cpuacct root_cpuacct = {
 	.cpustat	= &kernel_cpustat,
@@ -61,8 +72,11 @@ cpuacct_css_alloc(struct cgroup_subsys_state *parent_css)
 {
 	struct cpuacct *ca;
 
-	if (!parent_css)
+	if (!parent_css) {
+		res_counter_init(&root_cpuacct.task_limit, NULL);
+		res_counter_init(&root_cpuacct.fork_limit, NULL);
 		return &root_cpuacct.css;
+	}
 
 	ca = kzalloc(sizeof(*ca), GFP_KERNEL);
 	if (!ca)
@@ -75,6 +89,12 @@ cpuacct_css_alloc(struct cgroup_subsys_state *parent_css)
 	ca->cpustat = alloc_percpu(struct kernel_cpustat);
 	if (!ca->cpustat)
 		goto out_free_cpuusage;
+
+	res_counter_init(&ca->task_limit, &css_ca(parent_css)->task_limit);
+	res_counter_inherit(&ca->task_limit, RES_LIMIT);
+
+	res_counter_init(&ca->fork_limit, &css_ca(parent_css)->fork_limit);
+	res_counter_inherit(&ca->fork_limit, RES_LIMIT);
 
 	return &ca->css;
 
@@ -210,6 +230,223 @@ static int cpuacct_stats_show(struct seq_file *sf, void *v)
 	return 0;
 }
 
+static u64 cpuacct_task_limit_read_u64(struct cgroup_subsys_state *css,
+				       struct cftype *cft)
+{
+	struct cpuacct *ca = css_ca(css);
+	int type = cft->private;
+
+	return res_counter_read_u64(&ca->task_limit, type);
+}
+
+static int cpuacct_task_limit_write_u64(struct cgroup_subsys_state *css,
+					struct cftype *cft, u64 val)
+{
+	struct cpuacct *ca = css_ca(css);
+	struct cgroup *cgrp = ca->css.cgroup;
+	int type = cft->private;
+
+	if (ca == &root_cpuacct)
+		return -EINVAL;
+
+	if (val != RES_COUNTER_MAX) {
+		if (cgroup_task_count(cgrp) || !list_empty(&cgrp->children))
+			return -EBUSY;
+		res_counter_write_u64(&ca->task_limit, type, val);
+	}
+
+	return 0;
+}
+
+static u64 cpuacct_fork_limit_read_u64(struct cgroup_subsys_state *css,
+				       struct cftype *cft)
+{
+	struct cpuacct *ca = css_ca(css);
+	int type = cft->private;
+
+	return res_counter_read_u64(&ca->fork_limit, type);
+}
+
+static int cpuacct_fork_limit_write_u64(struct cgroup_subsys_state *css,
+					struct cftype *cft, u64 val)
+{
+	struct cpuacct *ca = css_ca(css);
+	struct cgroup *cgrp = ca->css.cgroup;
+	int type = cft->private;
+
+	if (ca == &root_cpuacct)
+		return -EINVAL;
+
+	if (val != RES_COUNTER_MAX) {
+		/* always allow 0 to stop an ongoing fork bomb */
+		if (val != 0 &&
+		    (cgroup_task_count(cgrp) || !list_empty(&cgrp->children)))
+			return -EBUSY;
+		res_counter_write_u64(&ca->fork_limit, type, val);
+	}
+
+	return 0;
+}
+
+static int cpuacct_can_fork(void)
+{
+	int err = 0;
+	bool fork_charged = 0;
+	struct cpuacct *ca = task_ca(current);
+
+	if (ca == &root_cpuacct)
+		return 0;
+
+	if (res_limit_enabled(&ca->fork_limit)) {
+		if (res_counter_charge(&ca->fork_limit, 1, NULL))
+			return -EPERM;
+		fork_charged = 1;
+	}
+
+	if (res_limit_enabled(&ca->task_limit)) {
+		if (res_counter_charge(&ca->task_limit, 1, NULL)) {
+			err = -EAGAIN;
+			goto err_task_limit;
+		}
+	}
+
+	return 0;
+
+err_task_limit:
+	if (fork_charged)
+		res_counter_uncharge(&ca->fork_limit, 1);
+	return err;
+}
+
+static void cpuacct_cancel_can_fork(void)
+{
+	struct cpuacct *ca = task_ca(current);
+
+	if (ca == &root_cpuacct)
+		return;
+
+	if (res_limit_enabled(&ca->fork_limit))
+		res_counter_uncharge(&ca->fork_limit, 1);
+
+	if (res_limit_enabled(&ca->task_limit))
+		res_counter_uncharge(&ca->task_limit, 1);
+}
+
+
+static void cpuacct_exit(struct cgroup_subsys_state *css,
+			 struct cgroup_subsys_state *old_css,
+			 struct task_struct *task)
+{
+	struct cpuacct *ca = css_ca(old_css);
+
+	if (ca == &root_cpuacct)
+		return;
+
+	if (res_limit_enabled(&ca->task_limit))
+		res_counter_uncharge(&ca->task_limit, 1);
+}
+
+/*
+ * Complete the attach by uncharging the old cgroups. We can do that now that
+ * we are sure the attachment can't be cancelled anymore, because this uncharge
+ * operation couldn't be reverted later: a task in the old cgroup could fork
+ * after we uncharge and reach the task counter limit, making our return there
+ * not possible.
+ */
+static void cpuacct_attach(struct cgroup_subsys_state *css,
+			   struct cgroup_taskset *tset)
+{
+	struct task_struct *task;
+	struct cpuacct *new = css_ca(css);
+	struct cpuacct *old;
+	struct res_counter *until;
+
+	cgroup_taskset_for_each(task, NULL, tset) {
+		old = css_ca(cgroup_taskset_cur_css(tset, cpuacct_subsys_id));
+		until = res_counter_common_ancestor(&new->task_limit,
+						    &old->task_limit);
+		if (until == &root_cpuacct.task_limit)
+			until = NULL;
+		if (res_limit_enabled(&old->task_limit))
+			res_counter_uncharge_until(&old->task_limit, until, 1);
+	}
+}
+
+static void cpuacct_cancel_attach_until(struct cgroup_subsys_state *css,
+					struct cgroup_taskset *tset,
+					struct task_struct *until_task)
+{
+	struct task_struct *task;
+	struct cpuacct *new = css_ca(css);
+	struct cpuacct *old;
+	struct res_counter *until;
+
+	cgroup_taskset_for_each(task, NULL, tset) {
+		if (task == until_task)
+			break;
+		old = css_ca(cgroup_taskset_cur_css(tset, cpuacct_subsys_id));
+		until = res_counter_common_ancestor(&new->task_limit,
+						    &old->task_limit);
+		if (until == &root_cpuacct.task_limit)
+			until = NULL;
+		if (res_limit_enabled(&new->task_limit))
+			res_counter_uncharge_until(&new->task_limit, until, 1);
+	}
+}
+
+/*
+ * This does more than just probing the ability to attach to the dest cgroup.
+ * We can not just _check_ if we can attach to the destination and do the real
+ * attachment later in cpuacct_attach() because a task in the dest cgroup can
+ * fork before we get there and steal the last remaining count, thus we must
+ * charge the dest cgroup right now.
+ */
+static int cpuacct_can_attach(struct cgroup_subsys_state *css,
+			      struct cgroup_taskset *tset)
+{
+	struct task_struct *task;
+	struct cpuacct *new = css_ca(css);
+	struct cpuacct *old;
+	struct res_counter *until;
+	int err;
+
+	cgroup_taskset_for_each(task, NULL, tset) {
+		old = css_ca(cgroup_taskset_cur_css(tset, cpuacct_subsys_id));
+
+		/*
+		 * When moving a task from a cgroup to another, we don't want
+		 * to charge the common ancestors, even though they would be
+		 * uncharged later in cpuacct_attach(), because during that
+		 * short window between charge and uncharge, a task could fork
+		 * in the ancestor and spuriously fail due to the temporary
+		 * charge. The exception is root_cpuacct since it is unlimited.
+		 */
+		until = res_counter_common_ancestor(&new->task_limit,
+						    &old->task_limit);
+		if (until == &root_cpuacct.task_limit)
+			until = NULL;
+
+		if (!res_limit_enabled(&new->task_limit))
+			continue;
+
+		err = res_counter_charge_until(&new->task_limit, until, 1, NULL);
+		if (err) {
+			cpuacct_cancel_attach_until(css, tset, task);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+/* Uncharge the cgroup that we charged in cpuacct_can_attach() */
+static void cpuacct_cancel_attach(struct cgroup_subsys_state *css,
+				  struct cgroup_taskset *tset)
+{
+	cpuacct_cancel_attach_until(css, tset, NULL);
+}
+
+
 static struct cftype files[] = {
 	{
 		.name = "usage",
@@ -223,6 +460,28 @@ static struct cftype files[] = {
 	{
 		.name = "stat",
 		.seq_show = cpuacct_stats_show,
+	},
+	{
+		.name = "task_limit",
+		.read_u64 = cpuacct_task_limit_read_u64,
+		.write_u64 = cpuacct_task_limit_write_u64,
+		.private = RES_LIMIT,
+	},
+	{
+		.name = "task_usage",
+		.read_u64 = cpuacct_task_limit_read_u64,
+		.private = RES_USAGE,
+	},
+	{
+		.name = "fork_limit",
+		.read_u64 = cpuacct_fork_limit_read_u64,
+		.write_u64 = cpuacct_fork_limit_write_u64,
+		.private = RES_LIMIT,
+	},
+	{
+		.name = "fork_usage",
+		.read_u64 = cpuacct_fork_limit_read_u64,
+		.private = RES_USAGE,
 	},
 	{ }	/* terminate */
 };
@@ -276,10 +535,16 @@ void cpuacct_account_field(struct task_struct *p, int index, u64 val)
 }
 
 struct cgroup_subsys cpuacct_subsys = {
-	.name		= "cpuacct",
-	.css_alloc	= cpuacct_css_alloc,
-	.css_free	= cpuacct_css_free,
-	.subsys_id	= cpuacct_subsys_id,
-	.base_cftypes	= files,
-	.early_init	= 1,
+	.name			= "cpuacct",
+	.css_alloc		= cpuacct_css_alloc,
+	.css_free		= cpuacct_css_free,
+	.subsys_id		= cpuacct_subsys_id,
+	.base_cftypes		= files,
+	.early_init		= 1,
+	.can_fork		= cpuacct_can_fork,
+	.cancel_can_fork	= cpuacct_cancel_can_fork,
+	.exit			= cpuacct_exit,
+	.attach			= cpuacct_attach,
+	.can_attach		= cpuacct_can_attach,
+	.cancel_attach		= cpuacct_cancel_attach,
 };
