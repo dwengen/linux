@@ -2,11 +2,13 @@ CPU Accounting Controller
 -------------------------
 
 The CPU accounting controller is used to group tasks using cgroups and
-account the CPU usage of these groups of tasks.
+account the CPU usage of these groups of tasks. It can also limit the
+number of tasks running inside the cgroup, and limit the total number of
+forks done by processes in the cgroup.
 
 The CPU accounting controller supports multi-hierarchy groups. An accounting
-group accumulates the CPU usage of all of its child groups and the tasks
-directly present in its group.
+group accumulates the CPU and task usage of all of its child groups and the
+tasks directly present in its group.
 
 Accounting groups can be created by first mounting the cgroup filesystem.
 
@@ -47,3 +49,28 @@ system times. This has two side effects:
   against concurrent writes.
 - It is possible to see slightly outdated values for user and system times
   due to the batch processing nature of percpu_counter.
+
+cpuacct.fork_usage maintains a counter which is incremented each time a new
+process/thread is created.
+
+cpuacct.fork_limit limits the number of times a new child process or thread
+can be created. If cpuacct.fork_limit is set, when cpuacct.fork_usage
+reaches the limit, no process in the cgroup is allowed to create new child
+processes/threads, even if existing ones quit. This limit can only be set
+greater than cpuacct.fork_usage. Setting the limit to 0 is a special case
+that is always allowed and is useful for stopping an in progress fork bomb.
+The limit in the root of the cgroup heirarchy cannot be set.
+
+This has been proven useful in a shared hosting environment.  A new
+temporary cgroup is created for each CGI process, and the maximum fork
+count is configured to a sensible value.  Since CGIs are expected to
+run for only a short time with predictable resource usage, this may be
+an appropriate tool to limit the damage that a freaked CGI can do.
+
+cpuacct.task_usage maintains a counter of the number of tasks in the cgroup.
+
+cpuacct.task_limit limits the number of tasks running inside a given cgroup.
+It behaves like the NR_PROC rlimit but in the scope of a cgroup instead of a
+user. This limit is checked when a task forks or when it is migrated to the
+cgroup. The limit can only be set greater than cpuacct.task_usage. The limit
+in the root of the cgroup heirarchy cannot be set.
