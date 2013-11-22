@@ -566,7 +566,7 @@ int cgroup_taskset_size(struct cgroup_taskset *tset);
 	     (task) = cgroup_taskset_next((tset)))			\
 		if (!(skip_css) ||					\
 		    cgroup_taskset_cur_css((tset),			\
-			(skip_css)->ss->subsys_id) != (skip_css))
+			((struct cgroup_subsys_state *)skip_css)->ss->subsys_id) != (skip_css))
 
 /*
  * Control Group subsystem type.
